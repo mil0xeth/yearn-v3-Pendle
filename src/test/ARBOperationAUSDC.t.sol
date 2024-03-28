@@ -15,7 +15,7 @@ contract ARBOperationAUSDCTest is OperationTest {
         vm.selectFork(arbitrumFork);
 
         //asset from https://docs.pendle.finance/Developers/Deployments/: Markets --> PT-aUSDC-27JUN24/SY-aUSDC Market --> asset
-        asset = ERC20(0x8621c587059357d6C669f72dA3Bfe1398fc0D0B5); //PT-aUSDC-27JUN24/SY-aUSDC Market
+        asset = ERC20(0xBa4A858d664Ddb052158168DB04AFA3cFF5CFCC8); //PT-aUSDC-27JUN24/SY-aUSDC Market
         //targetToken from asset --> readTokens --> SY --> getTokensIn --> targetToken
         targetToken = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831; //USDC
         unwrapTargetTokenToSY = false;

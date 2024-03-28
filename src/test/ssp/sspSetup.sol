@@ -1,0 +1,408 @@
+// SPDX-License-Identifier: AGPL-3.0
+pragma solidity 0.8.18;
+
+import "forge-std/console.sol";
+import {ExtendedTest} from "../utils/ExtendedTest.sol";
+
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+
+import {PendleLPCompounderFactory} from "../../PendleLPCompounderFactory.sol";
+import {PendleLPCompounder} from "../../PendleLPCompounder.sol";
+import {SingleSidedPendleFactory} from "../../SingleSidedPendleFactory.sol";
+import {SingleSidedPendle} from "../../SingleSidedPendle.sol";
+
+import {IStrategyFactoryInterface} from "../../interfaces/IStrategyFactoryInterface.sol";
+import {ISSPStrategyFactoryInterface} from "../../interfaces/ISSPStrategyFactoryInterface.sol";
+import {IStrategyInterface} from "../../interfaces/IStrategyInterface.sol";
+import {ISSPStrategyInterface} from "../../interfaces/ISSPStrategyInterface.sol";
+import {IPendleMarket} from "../../interfaces/IPendleMarket.sol";
+
+// Inherit the events so they can be checked if desired.
+import {IEvents} from "@tokenized-strategy/interfaces/IEvents.sol";
+import {TokenizedStrategy} from "@tokenized-strategy/TokenizedStrategy.sol";
+
+interface IFactory {
+    function governance() external view returns (address);
+
+    function set_protocol_fee_bps(uint16) external;
+
+    function set_protocol_fee_recipient(address) external;
+}
+
+contract sspSetup is ExtendedTest, IEvents {
+    // Contract instancees that we will use repeatedly.
+    ERC20 public asset;
+    ERC20 public sspAsset;
+    bool public unwrapAssetToSY;
+    bool public unwrapTargetTokenToSY;
+    address public redeemToken;
+    address public oracle;
+    uint256 public maxSingleTrade;
+    address public pendleStaking;
+    address public PENDLE;
+    uint24 feePENDLEtoBase;
+    address base; 
+    uint24 feeBaseToTargetToken; 
+    address targetToken;
+    address public GOV;
+    address public additionalReward1;
+    uint24 feeAdditionalReward1toBase;
+    address public additionalReward2;
+    uint24 feeAdditionalReward2toBase;
+    IStrategyInterface public strategy;
+    ISSPStrategyInterface public sspStrategy;
+    IStrategyFactoryInterface public strategyFactory;
+    ISSPStrategyFactoryInterface public sspStrategyFactory;
+    address[] route;
+
+    mapping(string => address) public tokenAddrs;
+
+    // Addresses for different roles we will use repeatedly.
+    address public user = address(10);
+    address public keeper = address(4);
+    address public management = address(1);
+    address public performanceFeeRecipient = address(3);
+
+    // Address of the real deployed Factory
+    address public factory;
+
+    // Integer variables that will be used repeatedly.
+    uint256 public decimals;
+    uint256 public MAX_BPS = 10_000;
+
+    bool public forceProfit = false; //to be used with minimum deposit contracts
+
+    // Fuzz from $0.01 of 1e6 stable coins up to 1 billion of a 1e18 coin
+    uint256 public maxFuzzAmount = 1e27;
+    uint256 public minFuzzAmount = 5_00e15;
+
+    // Default prfot max unlock time is set for 10 days
+    uint256 public profitMaxUnlockTime = 10 days;
+
+    bytes32 public constant BASE_STRATEGY_STORAGE = bytes32(uint256(keccak256("yearn.base.strategy.storage")) - 1);
+
+    function setUp() public virtual {
+        uint256 mainnetFork = vm.createFork("mainnet");
+        //uint256 arbitrumFork = vm.createFork("arbitrum");
+        //uint256 polygonFork = vm.createFork("polygon");
+        //uint256 optimismFork = vm.createFork("optimism");
+        
+
+        vm.selectFork(mainnetFork);
+        //vm.selectFork(arbitrumFork);
+        //vm.selectFork(polygonFork);
+        //vm.selectFork(optimismFork);
+
+        //Fork specific parameters:
+        //MAINNET:
+        sspAsset = ERC20(0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2); //WETH
+        unwrapAssetToSY = true; //WETH-->ETH-->EETH
+        redeemToken = 0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee; //WEETH
+        oracle = 0x66a1096C6366b2529274dF4f5D8247827fe4CEA8; //Mainnet oracle
+        maxSingleTrade = 1000e18;
+
+        //asset from https://docs.pendle.finance/Developers/Deployments/: Markets --> PT-eETH-27JUN24 /SY-weETH Market --> asset
+        asset = ERC20(0xF32e58F92e60f4b0A37A69b95d642A471365EAe8); //PT-eETH-27JUN24 /SY-weETH Market
+        unwrapTargetTokenToSY = true;
+        //targetToken from asset --> readTokens --> SY --> getTokensIn --> targetToken
+        targetToken = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2; //WETH
+        //(0.01% = 100, 0.05% = 500, 0.3% = 3000, 1% = 10000)
+        feeBaseToTargetToken = 500;
+
+        //ARB rewards:
+        //additionalReward1 = 0x912CE59144191C1204E64559FE8253a0e49E6548;
+        //feeAdditionalReward1toBase = 500;
+
+        //PNP rewards:
+        //additionalReward2 = 0x2Ac2B254Bc18cD4999f64773a966E4f4869c34Ee;
+        //feeAdditionalReward2toBase = 10000;
+        
+        //chain specific:
+        base = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2; //WETH
+        PENDLE = 0x808507121B80c02388fAd14726482e061B8da827;
+        //(0.01% = 100, 0.05% = 500, 0.3% = 3000, 1% = 10000)
+        feePENDLEtoBase = 3000;
+
+        pendleStaking = 0x6E799758CEE75DAe3d84e09D40dc416eCf713652; //https://docs.penpiexyz.io/smart-contracts --> Arbitrum --> PendleStaking
+        GOV = 0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52;  
+        
+        // Set decimals
+        decimals = asset.decimals();
+        strategyFactory = setUpStrategyFactory();
+
+        // Deploy strategy and set variables
+        vm.prank(management);
+        strategy = IStrategyInterface(strategyFactory.newPendleLPCompounder(address(asset), feePENDLEtoBase, base, feeBaseToTargetToken, targetToken, "Strategy"));
+        setUpStrategy();
+
+        factory = strategy.FACTORY();
+        
+        /*
+        // reward:
+        if (additionalReward1 != address(0)) {
+            vm.prank(management);
+            strategy.addReward(additionalReward1, feeAdditionalReward1toBase, true);
+        }
+
+        // reward:
+        if (additionalReward2 != address(0)) {
+            vm.prank(management);
+            strategy.addReward(additionalReward2, feeAdditionalReward2toBase, true);
+        }
+        */
+        sspStrategyFactory = setUpSSPStrategyFactory();
+        // Deploy strategy and set variables
+        vm.prank(management);
+        sspStrategy = ISSPStrategyInterface(sspStrategyFactory.newSingleSidedPendle(address(sspAsset), address(asset), redeemToken, address(strategy), maxSingleTrade, "Strategy"));
+        setUpSSPStrategy();
+
+        // label all the used addresses for traces
+        vm.label(keeper, "keeper");
+        vm.label(factory, "factory");
+        vm.label(address(asset), "asset");
+        vm.label(management, "management");
+        vm.label(address(strategy), "strategy");
+        vm.label(address(sspStrategy), "sspStrategy");
+        vm.label(performanceFeeRecipient, "performanceFeeRecipient");
+        vm.label(address(strategyFactory), "strategyFactory");
+        vm.label(address(sspStrategyFactory), "sspStrategyFactory");
+    }
+
+    function setUpStrategyFactory() public returns (IStrategyFactoryInterface) {
+        IStrategyFactoryInterface _factory = IStrategyFactoryInterface(
+            address(
+                new PendleLPCompounderFactory(
+                    management,
+                    performanceFeeRecipient,
+                    keeper,
+                    pendleStaking,
+                    PENDLE,
+                    GOV,
+                    GOV
+                )
+            )
+        );
+        return _factory;
+    }
+
+    function setUpSSPStrategyFactory() public returns (ISSPStrategyFactoryInterface) {
+        ISSPStrategyFactoryInterface _factory = ISSPStrategyFactoryInterface(
+            address(
+                new SingleSidedPendleFactory(
+                    management,
+                    performanceFeeRecipient,
+                    keeper,
+                    oracle,
+                    GOV,
+                    GOV
+                )
+            )
+        );
+        return _factory;
+    }
+
+    function setUpStrategy() public {
+        vm.prank(management);
+        strategy.acceptManagement();
+        vm.prank(management);
+        strategy.setProfitLimitRatio(1_000_000_000_000);
+        //vm.prank(management);
+        //strategy.setProfitMaxUnlockTime(0);
+    }
+
+    function setUpSSPStrategy() public {
+        vm.prank(management);
+        sspStrategy.acceptManagement();
+        vm.prank(management);
+        sspStrategy.setProfitLimitRatio(1_000_000_000_000);
+        //vm.prank(management);
+        //strategy.setProfitMaxUnlockTime(0);
+    }
+
+    function depositIntoStrategy(
+        IStrategyInterface _strategy,
+        address _user,
+        uint256 _amount
+    ) public {
+        depositIntoStrategy(_strategy, _user, _amount, asset);
+    }
+
+    function depositIntoStrategy(
+        IStrategyInterface _strategy,
+        address _user,
+        uint256 _amount,
+        ERC20 _asset
+    ) public {
+        vm.prank(_user);
+        _asset.approve(address(_strategy), _amount);
+
+        vm.prank(_user);
+        _strategy.deposit(_amount, _user);
+    }
+
+    function mintAndDepositIntoStrategy(
+        IStrategyInterface _strategy,
+        address _user,
+        uint256 _amount
+    ) public {
+        mintAndDepositIntoStrategy(_strategy, _user, _amount, asset);
+    }
+
+    function mintAndDepositIntoStrategy(
+        IStrategyInterface _strategy,
+        address _user,
+        uint256 _amount,
+        ERC20 _asset
+    ) public {
+        airdrop(_asset, _user, _amount);
+        depositIntoStrategy(_strategy, _user, _amount, _asset);
+    }
+
+    // For checking the amounts in the strategy
+    function checkStrategyTotals(
+        IStrategyInterface _strategy,
+        uint256 _totalAssets,
+        uint256 _totalDebt,
+        uint256 _totalIdle
+    ) public {
+        assertEq(_strategy.totalAssets(), _totalAssets, "!totalAssets");
+        //assertEq(_strategy.totalDebt(), _totalDebt, "!totalDebt");
+        //assertEq(_strategy.totalDebt(), _totalDebt, "!totalDebt");
+        //assertEq(_strategy.totalIdle(), _totalIdle, "!totalIdle");
+        assertEq(asset.balanceOf(address(_strategy)), _totalIdle, "!totalIdle");
+        assertEq(_totalAssets, _totalDebt + _totalIdle, "!Added");
+    }
+
+    function checkStrategyInvariants(IStrategyInterface _strategy) public {
+        (address SY, address PT, address YT) = IPendleMarket(address(asset)).readTokens();
+        assertLe(ERC20(SY).balanceOf(address(_strategy)), 10, "SY balance > DUST");
+        assertLe(ERC20(PT).balanceOf(address(_strategy)), 10, "PT balance > DUST");
+        assertLe(ERC20(YT).balanceOf(address(_strategy)), 10, "YT balance > DUST");
+        assertLe(ERC20(PENDLE).balanceOf(address(_strategy)), 10, "PENDLE balance > DUST");
+        assertLe(asset.balanceOf(address(_strategy)), 10, "asset not fully in investment");
+        if (additionalReward1 != address(0)) {
+            assertLe(ERC20(additionalReward1).balanceOf(address(_strategy)), 10, "additionalReward1 balance > DUST");
+        }
+        if (additionalReward2 != address(0)) {
+            assertLe(ERC20(additionalReward2).balanceOf(address(_strategy)), 10, "additionalReward2 balance > DUST");
+        }
+    }
+
+    function checkStrategyInvariantsAfterReport(IStrategyInterface _strategy) public {
+        (address SY, address PT, address YT) = IPendleMarket(address(asset)).readTokens();
+        assertLe(ERC20(SY).balanceOf(address(_strategy)), 10, "SY balance > DUST");
+        assertLe(ERC20(PT).balanceOf(address(_strategy)), 10, "PT balance > DUST");
+        assertLe(ERC20(YT).balanceOf(address(_strategy)), 10, "YT balance > DUST");
+        assertLe(ERC20(PENDLE).balanceOf(address(_strategy)), 10, "PENDLE balance > DUST");
+        assertLe(asset.balanceOf(address(_strategy)), 10, "asset not fully in investment");
+        if (additionalReward1 != address(0)) {
+            assertLe(ERC20(additionalReward1).balanceOf(address(_strategy)), 10, "additionalReward1 balance > DUST");
+        }
+        if (additionalReward2 != address(0)) {
+            assertLe(ERC20(additionalReward2).balanceOf(address(_strategy)), 10, "additionalReward2 balance > DUST");
+        }
+    }
+
+    function airdrop(ERC20 _asset, address _to, uint256 _amount) public {
+        uint256 balanceBefore = _asset.balanceOf(_to);
+        deal(address(_asset), _to, balanceBefore + _amount);
+    }
+
+    function setFees(uint16 _protocolFee, uint16 _performanceFee) public {
+        address gov = IFactory(factory).governance();
+
+        // Need to make sure there is a protocol fee recipient to set the fee.
+        vm.prank(gov);
+        IFactory(factory).set_protocol_fee_recipient(gov);
+
+        vm.prank(gov);
+        IFactory(factory).set_protocol_fee_bps(_protocolFee);
+
+        vm.startPrank(management);
+        strategy.setPerformanceFee(_performanceFee);
+        vm.stopPrank();
+    }
+
+    function setFeesSSP(uint16 _protocolFee, uint16 _performanceFee) public {
+        address gov = IFactory(factory).governance();
+
+        // Need to make sure there is a protocol fee recipient to set the fee.
+        vm.prank(gov);
+        IFactory(factory).set_protocol_fee_recipient(gov);
+
+        vm.prank(gov);
+        IFactory(factory).set_protocol_fee_bps(_protocolFee);
+
+        vm.startPrank(management);
+        sspStrategy.setPerformanceFee(_performanceFee);
+        vm.stopPrank();
+    }
+
+    function _setTokenAddrs() internal {
+        tokenAddrs["WMATIC"] = 0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270;
+        tokenAddrs["WBTC"] = 0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6;
+        tokenAddrs["WETH"] = 0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619;
+        tokenAddrs["USDT"] = 0xc2132D05D31c914a87C6611C10748AEb04B58e8F;
+        tokenAddrs["DAI"] = 0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063;
+        tokenAddrs["USDC"] = 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174;
+        tokenAddrs["SD"] = 0x1d734A02eF1e1f5886e66b0673b71Af5B53ffA94;
+
+        tokenAddrs["WMATIC-WETH-LP"] = 0x02203f2351E7aC6aB5051205172D3f772db7D814;
+        tokenAddrs["WBTC-WETH-LP"] = 0x4B9e26a02121a1C541403a611b542965Bd4b68Ce;
+        tokenAddrs["USDC-WETH-LP"] = 0x3Cc20A6795c4b57d9817399F68E83e71C8626580;
+        tokenAddrs["WMATIC-USDC-LP"] = 0x04d521E2c414E6d898c6F2599FdD863Edf49e247;
+        tokenAddrs["WBTC-USDC-LP"] = 0x3f35705479d9d77c619b2aAC9dd7a64e57151506;
+        tokenAddrs["USDC-USDT-LP"] = 0x795f8c9B0A0Da9Cd8dea65Fc10f9B57AbC532E58;
+        tokenAddrs["WMATIC-WETH-WIDE-LP"] = 0x81Cec323BF8C4164c66ec066F53cc053A535f03D;
+        tokenAddrs["USDC-DAI-LP"] = 0x9E31214Db6931727B7d63a0D2b6236DB455c0965;
+        tokenAddrs["WMATIC-MATICX-LP"] = 0x8dd3BF71eF18dd88869d128BDE058C9d8c270176;
+    }
+
+    // For easier calculations we may want to set the performance fee
+    // to 0 in some tests which is underneath the minimum. So we do it manually.
+    function setPerformanceFeeToZero(address _strategy) public {
+        bytes32 slot;
+        TokenizedStrategy.StrategyData storage S = _strategyStorage();
+
+        assembly {
+            // Perf fee is stored in the 12th slot of the Struct.
+            slot := add(S.slot, 12)
+        }
+
+        // Performance fee is packed in a slot with other variables so we need
+        // to maintain the same variables packed in the slot
+
+        // profitMaxUnlock time is a uint32 at the most significant spot.
+        bytes32 data = bytes4(
+            uint32(IStrategyInterface(_strategy).profitMaxUnlockTime())
+        );
+        // Free up space for the uint16 of performancFee
+        data = data >> 16;
+        // Store 0 in the performance fee spot.
+        data |= bytes2(0);
+        // Shit 160 bits for an address
+        data = data >> 160;
+        // Store the strategies peformance fee recipient
+        data |= bytes20(
+            uint160(IStrategyInterface(_strategy).performanceFeeRecipient())
+        );
+        // Shift the remainder of padding.
+        data = data >> 48;
+
+        // Manually set the storage slot that holds the perfomance fee to 0
+        vm.store(_strategy, slot, data);
+    }
+
+    function _strategyStorage()
+        internal
+        pure
+        returns (TokenizedStrategy.StrategyData storage S)
+    {
+        // Since STORAGE_SLOT is a constant, we have to put a variable
+        // on the stack to access it from an inline assembly block.
+        bytes32 slot = BASE_STRATEGY_STORAGE;
+        assembly {
+            S.slot := slot
+        }
+    }
+}
